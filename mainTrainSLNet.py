@@ -1,8 +1,6 @@
-import torch
-import nrrd
-import sys
-from PIL import Image
 
+import sys
+import torch
 from torch.utils import data
 from torch.utils.data.sampler import SubsetRandomSampler
 from torch.utils.tensorboard import SummaryWriter
@@ -25,8 +23,8 @@ from utils.misc_utils import *
 
 # Arguments
 parser = argparse.ArgumentParser()
-parser.add_argument('--data_folder', nargs='?', default= "", help='Input training images path in format /XLFM_image/XLFM_image_stack.tif and XLFM_image_stack_S.tif in case of a sparse GT stack.')
-parser.add_argument('--data_folder_test', nargs='?', default= "", help='Input testing image path')
+parser.add_argument('--data_folder', nargs='?', default= "/u/home/vizcainj/share-all/XLFM-data/real_images/dataset_fish3_new__augmented_2022_03_31__15:30:45_100It___100DC_/", help='Input training images path in format /XLFM_image/XLFM_image_stack.tif and XLFM_image_stack_S.tif in case of a sparse GT stack.')
+parser.add_argument('--data_folder_test', nargs='?', default= "/u/home/vizcainj/share-all/XLFM-data/real_images/dataset_fish3_new__augmented_2022_03_31__15:30:45_100It___100DC_/", help='Input testing image path')
 parser.add_argument('--lenslet_file', nargs='?', default= "lenslet_centers_python.txt", help='Text file with the lenslet coordinates pairs x y "\n"')
 
 parser.add_argument('--files_to_store', nargs='+', default=[], help='Relative paths of files to store in a zip when running this script, for backup.')
@@ -38,7 +36,7 @@ parser.add_argument('--images_to_use_test', nargs='+', type=int, default=list(ra
 parser.add_argument('--lenslet_crop_size', type=int, default=512, help='Side size of the microlens image.')
 parser.add_argument('--img_size', type=int, default=2160, help='Side size of input image, square prefered.')
 # Training arguments
-parser.add_argument('--batch_size', type=int, default=8, help='Training batch size.') 
+parser.add_argument('--batch_size', type=int, default=1, help='Training batch size.') 
 parser.add_argument('--learning_rate', type=float, default=0.0001, help='Training learning rate.')
 parser.add_argument('--max_epochs', type=int, default=1001, help='Training epochs to run.')
 parser.add_argument('--validation_split', type=float, default=0.1, help='Which part to use for validation 0 to 1.')
@@ -60,12 +58,12 @@ parser.add_argument('--SL_alpha_l1', type=float, default=0.1, help='Threshold va
 parser.add_argument('--SL_mu_sum_constraint', type=float, default=1e-2, help='Threshold value for mu in sparse decomposition.')
 parser.add_argument('--weight_multiplier', type=float, default=0.5, help='Initialization multiplyier for weights, important parameter.')
 # SLNet config
-parser.add_argument('--temporal_shifts', nargs='+', type=int, default=[0,49,99], help='Which frames to use for training and testing.')
+parser.add_argument('--temporal_shifts', nargs='+', type=int, default=[0,1,2], help='Which frames to use for training and testing.')
 parser.add_argument('--use_random_shifts', nargs='+', type=int, default=0, help='Randomize the temporal shifts to use? 0 or 1')
 parser.add_argument('--frame_to_grab', type=int, default=0, help='Which frame to show from the sparse decomposition?')
 parser.add_argument('--l0_ths', type=float, default=0.05, help='Threshold value for alpha in nuclear decomposition')
 # misc arguments
-parser.add_argument('--output_path', nargs='?', default='')
+parser.add_argument('--output_path', nargs='?', default='experiments')
 parser.add_argument('--main_gpu', nargs='+', type=int, default=[0], help='List of GPUs to use: [0,1]')
 
 n_threads = 0
@@ -99,18 +97,17 @@ args.shuffle_dataset = bool(args.shuffle_dataset)
 label = subprocess.check_output(["git", "describe", "--always"]).strip()
 save_folder = args.output_path + datetime.now().strftime('%Y_%m_%d__%H:%M:%S') + str(args.main_gpu[0]) + "_gpu__" + args.prefix
 
+print(F'Logging directory: {save_folder}')
 
 # Load datasets
 args.subimage_shape = 2*[args.lenslet_crop_size]
 args.output_shape = 2*[args.lenslet_crop_size]
 dataset = XLFMDatasetFull(args.data_folder, args.lenslet_file, args.subimage_shape, img_shape=2*[args.img_size],
-            images_to_use=args.images_to_use, divisor=1, isTiff=True, n_frames_net=args.n_frames, eval_video=True,
-            load_all=True, load_sparse=False, load_vols=False, temporal_shifts=args.temporal_shifts, use_random_shifts=args.use_random_shifts)
+            images_to_use=args.images_to_use, load_vols=False, load_sparse=False, temporal_shifts=args.temporal_shifts, use_random_shifts=args.use_random_shifts)
 
 
 dataset_test = XLFMDatasetFull(args.data_folder_test, args.lenslet_file, args.subimage_shape, 2*[args.img_size],  
-            images_to_use=args.images_to_use_test, divisor=1, isTiff=True, n_frames_net=args.n_frames, eval_video=True,
-            load_all=True, load_vols=False, load_sparse=False)
+            images_to_use=args.images_to_use_test, load_vols=False, load_sparse=False)
 
 # Get normalization values 
 max_images,max_images_sparse,max_volumes = dataset.get_max() 
@@ -150,7 +147,7 @@ def init_weights(m):
 
 
 # Create net
-net = SLNet(dataset.n_frames, use_bias=args.use_bias, mu_sum_constraint=args.SL_mu_sum_constraint, alpha_l1=args.SL_alpha_l1).to(device)
+net = SLNet(dataset.get_n_temporal_frames(), use_bias=args.use_bias, mu_sum_constraint=args.SL_mu_sum_constraint, alpha_l1=args.SL_alpha_l1).to(device)
 net.apply(init_weights)
 
 # Use multiple gpus?
@@ -367,7 +364,9 @@ for epoch in range(start_epoch, args.max_epochs):
         mean_time /= curr_loader_len
         mean_eigen_values /= curr_loader_len
         mean_eigen_values_cropped /= curr_loader_len
-        mean_eigen_crop = mean_eigen_values_cropped.sum().item()/mean_eigen_values.sum().item()
+        mean_eigen_crop = 0
+        if mean_eigen_values.sum().item()!=0:
+            mean_eigen_crop = mean_eigen_values_cropped.sum().item()/mean_eigen_values.sum().item()
         mean_sparse_l1 = F.relu(sparse_part).mean().item()
 
 
