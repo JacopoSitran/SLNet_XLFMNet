@@ -23,20 +23,20 @@ from utils.misc_utils import *
 
 # Arguments
 parser = argparse.ArgumentParser()
-parser.add_argument('--data_folder', nargs='?', default= "/u/home/vizcainj/share-all/XLFM-data/real_images/dataset_fish3_new__augmented_2022_03_31__15:30:45_100It___100DC_/", help='Input training images path in format /XLFM_image/XLFM_image_stack.tif and XLFM_image_stack_S.tif in case of a sparse GT stack.')
-parser.add_argument('--data_folder_test', nargs='?', default= "/u/home/vizcainj/share-all/XLFM-data/real_images/dataset_fish3_new__augmented_2022_03_31__15:30:45_100It___100DC_/", help='Input testing image path')
+parser.add_argument('--data_folder', nargs='?', default= "/u/home/vizcainj/share-all/XLFM-data/real_images/dataset_fish3_new/", help='Input training images path in format /XLFM_image/XLFM_image_stack.tif and XLFM_image_stack_S.tif in case of a sparse GT stack.')
+parser.add_argument('--data_folder_test', nargs='?', default= "/u/home/vizcainj/share-all/XLFM-data/real_images/dataset_fish2_new/", help='Input testing image path')
 parser.add_argument('--lenslet_file', nargs='?', default= "lenslet_centers_python.txt", help='Text file with the lenslet coordinates pairs x y "\n"')
 
 parser.add_argument('--files_to_store', nargs='+', default=[], help='Relative paths of files to store in a zip when running this script, for backup.')
 parser.add_argument('--prefix', nargs='?', default= "fishy", help='Prefix string for the output folder.')
 parser.add_argument('--checkpoint', nargs='?', default= "", help='File path of checkpoint of previous run.')
 # Images related arguments
-parser.add_argument('--images_to_use', nargs='+', type=int, default=list(range(0,140,1)), help='Indeces of images to train on.')
-parser.add_argument('--images_to_use_test', nargs='+', type=int, default=list(range(0,120,1)), help='Indeces of images to test on.')
+parser.add_argument('--images_to_use', nargs='+', type=int, default=list(range(0,30,1)), help='Indeces of images to train on.')
+parser.add_argument('--images_to_use_test', nargs='+', type=int, default=list(range(0,20,1)), help='Indeces of images to test on.')
 parser.add_argument('--lenslet_crop_size', type=int, default=512, help='Side size of the microlens image.')
 parser.add_argument('--img_size', type=int, default=2160, help='Side size of input image, square prefered.')
 # Training arguments
-parser.add_argument('--batch_size', type=int, default=1, help='Training batch size.') 
+parser.add_argument('--batch_size', type=int, default=8, help='Training batch size.') 
 parser.add_argument('--learning_rate', type=float, default=0.0001, help='Training learning rate.')
 parser.add_argument('--max_epochs', type=int, default=1001, help='Training epochs to run.')
 parser.add_argument('--validation_split', type=float, default=0.1, help='Which part to use for validation 0 to 1.')
@@ -58,7 +58,7 @@ parser.add_argument('--SL_alpha_l1', type=float, default=0.1, help='Threshold va
 parser.add_argument('--SL_mu_sum_constraint', type=float, default=1e-2, help='Threshold value for mu in sparse decomposition.')
 parser.add_argument('--weight_multiplier', type=float, default=0.5, help='Initialization multiplyier for weights, important parameter.')
 # SLNet config
-parser.add_argument('--temporal_shifts', nargs='+', type=int, default=[0,1,2], help='Which frames to use for training and testing.')
+parser.add_argument('--temporal_shifts', nargs='+', type=int, default=[0,4,9], help='Which frames to use for training and testing.')
 parser.add_argument('--use_random_shifts', nargs='+', type=int, default=0, help='Randomize the temporal shifts to use? 0 or 1')
 parser.add_argument('--frame_to_grab', type=int, default=0, help='Which frame to show from the sparse decomposition?')
 parser.add_argument('--l0_ths', type=float, default=0.05, help='Threshold value for alpha in nuclear decomposition')
@@ -95,7 +95,7 @@ args.shuffle_dataset = bool(args.shuffle_dataset)
 
 # Get commit number 
 label = subprocess.check_output(["git", "describe", "--always"]).strip()
-save_folder = args.output_path + datetime.now().strftime('%Y_%m_%d__%H:%M:%S') + str(args.main_gpu[0]) + "_gpu__" + args.prefix
+save_folder = F"{args.output_path}/{datetime.now().strftime('%Y_%m_%d__%H:%M:%S')}__{args.main_gpu[0]}_gpu__{args.prefix}"
 
 print(F'Logging directory: {save_folder}')
 
@@ -332,14 +332,14 @@ for epoch in range(start_epoch, args.max_epochs):
                 full_loss.backward()
 
                 # Check fo NAN in training
-                broken = False
-                with torch.no_grad():
-                    for param in net.parameters():
-                        if param.grad is not None:
-                            if torch.isnan(param.grad.mean()):
-                                broken = True
-                if broken:
-                    continue
+                # broken = False
+                # with torch.no_grad():
+                #     for param in net.parameters():
+                #         if param.grad is not None:
+                #             if torch.isnan(param.grad.mean()):
+                #                 broken = True
+                # if broken:
+                #     continue
 
                 optimizer.step()
 
