@@ -26,8 +26,8 @@ def volume_2_projections(vol_in, proj_type=torch.max, scaling_factors=[1,1,2], d
     vol = vol_in.detach().clone()
     # Normalize sets limits from 0 to 1
     if normalize:
-        vol -= vol.min()
-        vol /= vol.max()
+        vol -= vol.float().min()
+        vol /= vol.float().max()
     if depths_in_ch:
         vol = vol.permute(0,2,3,1).unsqueeze(1)
     if ths[0]!=0.0 or ths[1]!=1.0:
