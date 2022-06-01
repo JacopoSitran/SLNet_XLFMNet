@@ -89,7 +89,7 @@ def imshowComplex(vol, blocking=False):
 
 def save_image(tensor, path='output.png'):
     if 'tif' in path:
-        imsave(path, tensor[0,...].cpu().numpy().astype(np.float16))
+        plt.imsave(path, tensor[0,...].cpu().numpy().astype(np.float16))
         return
     if tensor.shape[1] == 1:
         imshow2D(tensor)
