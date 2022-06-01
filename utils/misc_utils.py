@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 import re
 import numpy as np
 import findpeaks
+from tifffile import imread
 
 # Prepare a volume to be shown in tensorboard as an image
 def volume_2_tensorboard(vol, batch_index=0, z_scaling=2):
@@ -89,7 +90,7 @@ def imshowComplex(vol, blocking=False):
 
 def save_image(tensor, path='output.png'):
     if 'tif' in path:
-        plt.imsave(path, tensor[0,...].cpu().numpy().astype(np.float16))
+        imsave(path, tensor[0,...].cpu().numpy().astype(np.float16))
         return
     if tensor.shape[1] == 1:
         imshow2D(tensor)
