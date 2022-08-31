@@ -1,3 +1,4 @@
+from tkinter.tix import Tree
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -99,12 +100,24 @@ class SLNet(nn.Module):
         self.mu_sum_constraint = torch.tensor(float(mu_sum_constraint))
         self.alpha_l1 = alpha_l1
 
-        self.relu = nn.ReLU()
-        self.conv1 = nn.Conv2d(n_temporal_frames, n_temporal_frames*2, 1, 1, 0, bias=use_bias)
-        self.conv2 = nn.Conv2d(n_temporal_frames*2, n_temporal_frames*1, 1, 1, 0, bias=use_bias)
-
+        # self.relu = nn.ReLU()
+        # self.conv1 = nn.Conv2d(n_temporal_frames, n_temporal_frames*2, 1, 1, 0, bias=use_bias)
+        # self.conv2 = nn.Conv2d(n_temporal_frames*2, n_temporal_frames*1, 1, 1, 0, bias=use_bias)
+        self.model = nn.Sequential(
+            nn.Conv2d(n_temporal_frames,n_temporal_frames*2,4,1,bias=use_bias),
+            nn.BatchNorm2d(n_temporal_frames*2),
+            nn.ReLU(),
+            nn.Conv2d(n_temporal_frames*2,n_temporal_frames*4,4,1,bias=use_bias),
+            nn.BatchNorm2d(n_temporal_frames*4),
+            nn.ReLU(),
+            nn.ConvTranspose2d(n_temporal_frames*4,n_temporal_frames*2,4,1,bias=use_bias),
+            nn.BatchNorm2d(n_temporal_frames*2),
+            nn.ReLU(),
+            nn.ConvTranspose2d(n_temporal_frames*2,n_temporal_frames, 4, 1, bias=use_bias),
+        )
     def forward(self, input):
-        x = (self.conv1(input))
-        x = self.relu(self.conv2(x))
+        # x = (self.conv1(input))
+        # x = self.relu(self.conv2(x))
+        x = self.model(input)
 
         return x
