@@ -19,6 +19,7 @@ import utils.pytorch_shot_noise as pytorch_shot_noise
 from nets.SLNet import SLNet
 from utils.XLFMDataset import XLFMDatasetVol
 from utils.misc_utils import *
+from itertools import chain
 
 
 # Arguments
@@ -148,17 +149,28 @@ def init_weights(m):
 
 
 # Create net
-net = SLNet(dataset.get_n_temporal_frames(), use_bias=args.use_bias, mu_sum_constraint=args.SL_mu_sum_constraint, alpha_l1=args.SL_alpha_l1).to(device)
-net.apply(init_weights)
+networks = []
+net1 = SLNet(dataset.get_n_temporal_frames(), use_bias=args.use_bias, mu_sum_constraint=args.SL_mu_sum_constraint, alpha_l1=args.SL_alpha_l1).to(device)
+net1.apply(init_weights)
+net2 = SLNet(dataset.get_n_temporal_frames(), use_bias=args.use_bias, mu_sum_constraint=args.SL_mu_sum_constraint, alpha_l1=args.SL_alpha_l1).to(device)
+net2.apply(init_weights)
+net3 = SLNet(dataset.get_n_temporal_frames(), use_bias=args.use_bias, mu_sum_constraint=args.SL_mu_sum_constraint, alpha_l1=args.SL_alpha_l1).to(device)
+net3.apply(init_weights)
+net4 = SLNet(dataset.get_n_temporal_frames(), use_bias=args.use_bias, mu_sum_constraint=args.SL_mu_sum_constraint, alpha_l1=args.SL_alpha_l1).to(device)
+net4.apply(init_weights)
+networks.append(net1)
+networks.append(net2)
+networks.append(net3)
+networks.append(net4)
 
 # Use multiple gpus?
-if len(args.main_gpu)>1:
-    net = nn.DataParallel(net, args.main_gpu, args.main_gpu[0])
-    print("Let's use", torch.cuda.device_count(), "GPUs!")
+# if len(args.main_gpu)>1:
+#     net = nn.DataParallel(net, args.main_gpu, args.main_gpu[0])
+#     print("Let's use", torch.cuda.device_count(), "GPUs!")
 
 # Trainable parameters
-trainable_params = list(net.parameters())
-params = sum([np.prod(p.size()) for p in net.parameters()])
+trainable_params = chain(net1.parameters(), net2.parameters(), net3.parameters(), net4.parameters())
+params = sum([np.prod(p.size()) for p in net1.parameters()])*len(networks)
 
 # Create optimizer
 optimizer = torch.optim.Adam(trainable_params, lr=args.learning_rate)
@@ -169,7 +181,7 @@ scaler = GradScaler()
 # Is there a checkpoint? load it
 start_epoch = 0
 if checkpoint_path:
-    net.load_state_dict(checkpoint['model_state_dict'])
+    # net.load_state_dict(checkpoint['model_state_dict'])
     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
     scaler.load_state_dict(checkpoint['scaler_state_dict'])
     start_epoch = checkpoint['epoch']-1
@@ -199,17 +211,20 @@ for epoch in range(start_epoch, args.max_epochs):
         curr_loader_len = curr_loader.sampler.num_samples if curr_train_stage=='test' else len(curr_loader.batch_sampler.sampler.indices)
 
         if curr_train_stage=='train':
-            net.train()
+            for net in networks:
+                net.train()
             torch.set_grad_enabled(True)
         if curr_train_stage=='val' or curr_train_stage=='test':
             if epoch%args.eval_every!=0:
                 continue
-            net.eval()
+            for net in networks:
+                net.eval()
             torch.set_grad_enabled(False)
 
 
         # Store losses of current epoch
-        mean_loss = 0 
+        mean_losses = [0,0,0,0] 
+        mean_sparse_l1 = [0,0,0,0]
         mean_psnr = 0
         mean_time = 0
         mean_eigen_values = torch.zeros([args.n_frames])
@@ -225,232 +240,238 @@ for epoch in range(start_epoch, args.max_epochs):
 
         # Training
         for ix,(_, curr_volume) in enumerate(curr_loader):
-            #curr_slice = curr_volume[:,:,slice,...]
-            curr_volume = curr_volume[:,:,40:80,...]
-            curr_slice = curr_volume.permute(0,2,1,3,4).reshape((-1,3,600,600))
+            for i in range(0,4):
+                    
+                #curr_slice = curr_volume[:,:,slice,...]
+                # curr_volume = curr_volume[:,:,30*i:30*i+29,...]
+                curr_slice = curr_volume[:,:,20*(i+1):20*(i+2),...].permute(0,2,1,3,4).reshape((-1,3,600,600))
 
-            curr_slice = curr_slice.to(device)
-            
-            # if GT sparse images are not loaded, then let's replicate the input images to avoid errors
-            if not curr_loader.dataset.load_sparse:
-                curr_slice = curr_slice.unsqueeze(-1).repeat(1,1,1,1,1,2)
-            assert len(curr_slice.shape)>=6, "If sparse is used curr_slice should contain both images, dense and sparse stacked in the last dim."
-            curr_slice_sparse = curr_slice[...,-1].clone().to(device).squeeze(0)
-            curr_slice = curr_slice[...,0].squeeze(0)
-
-            if True: # todo flag to check if it's a real dataset
-                curr_slice -= args.dark_current
-                curr_slice = F.relu(curr_slice).detach()
-                curr_slice_sparse -= args.dark_current_sparse
-                curr_slice_sparse = F.relu(curr_slice_sparse).detach()
-
-            # Apply noise if needed, and only in the test set, as the train set comes from real images
-            if args.add_noise==1 and curr_train_stage!='test':
-                curr_max = curr_slice.max()
-                # Update new signal power
-                signal_power = (args.signal_power_min + (args.signal_power_max-args.signal_power_min) * torch.rand(1)).item()
-                curr_slice = signal_power/curr_max * curr_slice
-                # Add noise
-                curr_slice = pytorch_shot_noise.add_camera_noise(curr_slice)
                 curr_slice = curr_slice.to(device)
-
                 
-            # Normalize input images
-            curr_slice, _ = normalize_type(curr_slice, 0, args.norm_type, mean_imgs, std_images, mean_vols, std_vols, max_images, max_volumes)
-            
-            if curr_train_stage=='train':
-                net.zero_grad()
-                optimizer.zero_grad()
-            
-            with autocast():
-                #torch.cuda.synchronize()
-                #start.record()
-                # Predict dense part with the network
+                # if GT sparse images are not loaded, then let's replicate the input images to avoid errors
+                if not curr_loader.dataset.load_sparse:
+                    curr_slice = curr_slice.unsqueeze(-1).repeat(1,1,1,1,1,2)
+                assert len(curr_slice.shape)>=6, "If sparse is used curr_slice should contain both images, dense and sparse stacked in the last dim."
+                curr_slice_sparse = curr_slice[...,-1].clone().to(device).squeeze(0)
+                curr_slice = curr_slice[...,0].squeeze(0)
 
-                dense_part = net(curr_slice)
-                dense_part = F.relu(dense_part)
+                if True: # todo flag to check if it's a real dataset
+                    curr_slice -= args.dark_current
+                    curr_slice = F.relu(curr_slice).detach()
+                    curr_slice_sparse -= args.dark_current_sparse
+                    curr_slice_sparse = F.relu(curr_slice_sparse).detach()
 
-                # Compute sparse part
-                sparse_part = F.relu(curr_slice-dense_part)
+                # Apply noise if needed, and only in the test set, as the train set comes from real images
+                if args.add_noise==1 and curr_train_stage!='test':
+                    curr_max = curr_slice.max()
+                    # Update new signal power
+                    signal_power = (args.signal_power_min + (args.signal_power_max-args.signal_power_min) * torch.rand(1)).item()
+                    curr_slice = signal_power/curr_max * curr_slice
+                    # Add noise
+                    curr_slice = pytorch_shot_noise.add_camera_noise(curr_slice)
+                    curr_slice = curr_slice.to(device)
 
-                # Measure time
-                #end.record()
-                #torch.cuda.synchronize()
-                #end_time = start.elapsed_time(end) / curr_slice.shape[0]
-                #mean_time += end_time
-
-                # Compute sparse decomposition on a patch, as the full image doesn't fit in memory due to SVD
-                # center = 64
-                # if curr_train_stage!='train':
-                #     center = 32
-                # coord_to_crop = torch.randint(center,dense_part.shape[3]-center, [2])
+                    
+                # Normalize input images
+                curr_slice, _ = normalize_type(curr_slice, 0, args.norm_type, mean_imgs, std_images, mean_vols, std_vols, max_images, max_volumes)
                 
-                # Grab patches
-                # dense_crop = dense_part[:,:,coord_to_crop[0]-center:coord_to_crop[0]+center,coord_to_crop[1]-center:coord_to_crop[1]+center].contiguous()
-                # sparse_crop = sparse_part[:,:,coord_to_crop[0]-center:coord_to_crop[0]+center,coord_to_crop[1]-center:coord_to_crop[1]+center].contiguous()
-                # curr_img_crop = curr_slice[:,:,coord_to_crop[0]-center:coord_to_crop[0]+center,coord_to_crop[1]-center:coord_to_crop[1]+center].detach()
-                
-                # Reconstruction error
-                Y = (curr_slice - dense_part - sparse_part)
-                # Nuclear norm
-                dense_vector = dense_part.view(dense_part.shape[0],dense_part.shape[1],-1)
-                with autocast(enabled=False):
-                    print("doing svd")
-                    (u,s,v) = torch.svd_lowrank(dense_vector.permute(0,2,1).float(), q=args.rank)
-                    #print("done svd")
-                    sOriginal = torch.autograd.Variable(s.clone())
-                    # eigenvalues thresholding operation
-                    s = torch.sign(s) * torch.max(s.abs() - net.mu_sum_constraint, torch.zeros_like(s))
-
-                mean_eigen_values += sOriginal.mean(dim=0).detach().cpu()
-                mean_eigen_values_cropped += s.mean(dim=0).detach().cpu()
-                
-                # Reconstruct the images from the eigen information
-                for nB in range(s.shape[0]):
-                    currS = torch.diag(s[nB,:])
-                    dense_vector[nB,...] = torch.mm(torch.mm(u[nB,...], currS), v[nB,...].t()).t()
-                reconstructed_dense = dense_vector.view(dense_part.shape)
-
-                # Compute full loss
-                full_loss = F.l1_loss(reconstructed_dense,curr_slice) + net.alpha_l1 * sparse_part.abs().mean() + Y.abs().mean()
-
-                sparse_part = F.relu(curr_slice - reconstructed_dense)
-                
-                #curr_volume[:,:,slice,...] = sparse_part
-
-                if ix==0 and args.plot_images and epoch%1 == 0 and curr_train_stage == 'train':
-                    import matplotlib as mpl
-                    mpl.use('Agg')
-                    plt.clf()
-                    # print("I am plotting")
-                    plt.set_cmap('bwr')
-
-                    for n in range(0,3):
-                        plt.subplot(3,5,5*n+1)
-                        plt.imshow(curr_slice[args.slice_to_grab,n,...].squeeze(0).detach().cpu().float().numpy())
-                        plt.title('Input')
-                        plt.subplot(3,5,5*n+2)
-                        plt.imshow(dense_part[args.slice_to_grab,n,...].squeeze(0).detach().cpu().float().numpy())
-                        plt.title('Dense prediction')
-                        plt.subplot(3,5,5*n+3)
-                        plt.imshow(sparse_part[args.slice_to_grab,n,...].squeeze(0).detach().cpu().float().numpy())
-                        plt.title('Sparse prediction')
-                        plt.subplot(3,5,5*n+4)
-                        plt.imshow(Y[args.slice_to_grab,n,...].squeeze(0).detach().cpu().float().numpy())
-                        plt.title('Y')
-                        plt.subplot(3,5,5*n+5)
-                        plt.imshow((dense_part - sparse_part)[args.slice_to_grab,n,...].squeeze(0).detach().cpu().float().numpy())
-                        plt.title('(dense - sparse')
-                    #plt.pause(0.1)       
-                    plt.savefig("tmp.png")
-                    print("finished plotting")
-
-
                 if curr_train_stage=='train':
-                    full_loss.backward()
-
-                    # Check fo NAN in training
-                    broken = False
-                    with torch.no_grad():
-                        for param in net.parameters():
-                            if param.grad is not None:
-                                if torch.isnan(param.grad.mean()):
-                                    broken = True
-                    if broken:
-                        continue
-
-                    optimizer.step()
-
-
-                # detach tensors for display
+                    networks[i].zero_grad()
+                    optimizer.zero_grad()
                 
-                curr_slice_sparse = curr_slice_sparse.detach()
-                curr_slice = curr_slice.detach()
-                dense_part = dense_part.detach()
-                sparse_part = sparse_part.detach()
+                with autocast():
+                    #torch.cuda.synchronize()
+                    #start.record()
+                    # Predict dense part with the network
 
-                # Normalize back
-                curr_slice,_ = normalize_type(curr_slice.float(), 0, args.norm_type, mean_imgs, std_images, mean_vols, std_vols, max_images, max_volumes, inverse=True)
-                sparse_part,_ = normalize_type(sparse_part.float(), 0, args.norm_type, mean_imgs, std_images, mean_vols, std_vols, max_images, max_volumes, inverse=True)
-                dense_part,_ = normalize_type(dense_part.float(), 0, args.norm_type, mean_imgs, std_images, mean_vols, std_vols, max_images, max_volumes, inverse=True)
-                
-                sparse_part = F.relu(curr_slice-dense_part.detach())
-                mean_loss += full_loss.item()
+                    dense_part = networks[i](curr_slice)
+                    # print(dense_part.shape)
+                    dense_part = F.relu(dense_part)
+
+                    # Compute sparse part
+                    sparse_part = F.relu(curr_slice-dense_part)
+
+                    # Measure time
+                    #end.record()
+                    #torch.cuda.synchronize()
+                    #end_time = start.elapsed_time(end) / curr_slice.shape[0]
+                    #mean_time += end_time
+
+                    # Compute sparse decomposition on a patch, as the full image doesn't fit in memory due to SVD
+                    # center = 64
+                    # if curr_train_stage!='train':
+                    #     center = 32
+                    # coord_to_crop = torch.randint(center,dense_part.shape[3]-center, [2])
+                    
+                    # Grab patches
+                    # dense_crop = dense_part[:,:,coord_to_crop[0]-center:coord_to_crop[0]+center,coord_to_crop[1]-center:coord_to_crop[1]+center].contiguous()
+                    # sparse_crop = sparse_part[:,:,coord_to_crop[0]-center:coord_to_crop[0]+center,coord_to_crop[1]-center:coord_to_crop[1]+center].contiguous()
+                    # curr_img_crop = curr_slice[:,:,coord_to_crop[0]-center:coord_to_crop[0]+center,coord_to_crop[1]-center:coord_to_crop[1]+center].detach()
+                    
+                    # Reconstruction error
+                    Y = (curr_slice - dense_part - sparse_part)
+                    # Nuclear norm
+                    dense_vector = dense_part.view(dense_part.shape[0],dense_part.shape[1],-1)
+                    with autocast(enabled=False):
+                        print("doing svd")
+                        (u,s,v) = torch.svd_lowrank(dense_vector.permute(0,2,1).float(), q=args.rank)
+                        #print("done svd")
+                        sOriginal = torch.autograd.Variable(s.clone())
+                        # eigenvalues thresholding operation
+                        s = torch.sign(s) * torch.max(s.abs() - networks[i].mu_sum_constraint, torch.zeros_like(s))
+
+                    mean_eigen_values += sOriginal.mean(dim=0).detach().cpu()
+                    mean_eigen_values_cropped += s.mean(dim=0).detach().cpu()
+                    
+                    # Reconstruct the images from the eigen information
+                    for nB in range(s.shape[0]):
+                        currS = torch.diag(s[nB,:])
+                        dense_vector[nB,...] = torch.mm(torch.mm(u[nB,...], currS), v[nB,...].t()).t()
+                    reconstructed_dense = dense_vector.view(dense_part.shape)
+
+                    # Compute full loss
+                    full_loss = F.l1_loss(reconstructed_dense,curr_slice) + networks[i].alpha_l1 * sparse_part.abs().mean() + Y.abs().mean()
+
+                    sparse_part = F.relu(curr_slice - reconstructed_dense)
+                    
+                    #curr_volume[:,:,slice,...] = sparse_part
+
+                    if ix==0 and args.plot_images and epoch%1 == 0 and curr_train_stage == 'train':
+                        import matplotlib as mpl
+                        mpl.use('Agg')
+                        plt.clf()
+                        # print("I am plotting")
+                        plt.set_cmap('bwr')
+
+                        for n in range(0,3):
+                            plt.subplot(3,5,5*n+1)
+                            plt.imshow(curr_slice[args.slice_to_grab,n,...].squeeze(0).detach().cpu().float().numpy())
+                            plt.title('Input')
+                            plt.subplot(3,5,5*n+2)
+                            plt.imshow(dense_part[args.slice_to_grab,n,...].squeeze(0).detach().cpu().float().numpy())
+                            plt.title('Dense prediction')
+                            plt.subplot(3,5,5*n+3)
+                            plt.imshow(sparse_part[args.slice_to_grab,n,...].squeeze(0).detach().cpu().float().numpy())
+                            plt.title('Sparse prediction')
+                            plt.subplot(3,5,5*n+4)
+                            plt.imshow(Y[args.slice_to_grab,n,...].squeeze(0).detach().cpu().float().numpy())
+                            plt.title('Y')
+                            plt.subplot(3,5,5*n+5)
+                            plt.imshow((dense_part - sparse_part)[args.slice_to_grab,n,...].squeeze(0).detach().cpu().float().numpy())
+                            plt.title('(dense - sparse')
+                        #plt.pause(0.1)       
+                        plt.savefig("tmp.png")
+                        print("finished plotting")
+
+
+                    if curr_train_stage=='train':
+                        full_loss.backward()
+
+                        # Check fo NAN in training
+                        broken = False
+                        with torch.no_grad():
+                            for param in networks[i].parameters():
+                                if param.grad is not None:
+                                    if torch.isnan(param.grad.mean()):
+                                        broken = True
+                        if broken:
+                            continue
+
+                        optimizer.step()
+
+
+                    # detach tensors for display
+                    
+                    curr_slice_sparse = curr_slice_sparse.detach()
+                    curr_slice = curr_slice.detach()
+                    dense_part = dense_part.detach()
+                    sparse_part = sparse_part.detach()
+
+                    # Normalize back
+                    curr_slice,_ = normalize_type(curr_slice.float(), 0, args.norm_type, mean_imgs, std_images, mean_vols, std_vols, max_images, max_volumes, inverse=True)
+                    sparse_part,_ = normalize_type(sparse_part.float(), 0, args.norm_type, mean_imgs, std_images, mean_vols, std_vols, max_images, max_volumes, inverse=True)
+                    dense_part,_ = normalize_type(dense_part.float(), 0, args.norm_type, mean_imgs, std_images, mean_vols, std_vols, max_images, max_volumes, inverse=True)
+                    
+                    sparse_part = F.relu(curr_slice-dense_part.detach())
+                    mean_losses[i] += full_loss.item()
+                    mean_sparse_l1[i] = F.relu(sparse_part).mean().item()
         # if ix == 1:
             # break
         # Compute different performance metrics
-        mean_loss /= curr_loader_len
-        mean_psnr = 20 * torch.log10(max_images / torch.sqrt(torch.tensor(mean_loss))) 
+        for loss in mean_losses:
+            loss /= curr_loader_len
+        # mean_psnr = 20 * torch.log10(max_images / torch.sqrt(torch.tensor(mean_losses))) 
         mean_time /= curr_loader_len
         mean_eigen_values /= curr_loader_len
         mean_eigen_values_cropped /= curr_loader_len
         mean_eigen_crop = 0
         if mean_eigen_values.sum().item()!=0:
             mean_eigen_crop = mean_eigen_values_cropped.sum().item()/mean_eigen_values.sum().item()
-        mean_sparse_l1 = F.relu(sparse_part).mean().item()
+        # mean_sparse_l1 = F.relu(sparse_part).mean().item()
 
 
         if epoch%args.eval_every==0:
-            print("eval")
-            # Create debug images
-            M = curr_slice[:,args.frame_to_grab,...].unsqueeze(1).to(device)
-            S_SLNet = sparse_part[:,args.frame_to_grab,...].unsqueeze(1).to(device)
-            L_SLNet = dense_part[:,args.frame_to_grab,...].unsqueeze(1).to(device)
-            Rank_SLNet = torch.matrix_rank(L_SLNet[args.slice_to_grab,0,...].float()).item()
+            for i in range(0,4):
+                print("eval")
+                # Create debug images
+                M = curr_slice[:,args.frame_to_grab,...].unsqueeze(1).to(device)
+                S_SLNet = sparse_part[:,args.frame_to_grab,...].unsqueeze(1).to(device)
+                L_SLNet = dense_part[:,args.frame_to_grab,...].unsqueeze(1).to(device)
+                Rank_SLNet = torch.matrix_rank(L_SLNet[args.slice_to_grab,0,...].float()).item()
 
-            fro_M = torch.norm(M).item()
-            fro_SLNet = torch.norm(M-L_SLNet-S_SLNet).item()
-            mean_error = (M-L_SLNet-S_SLNet).mean().item()
-            L1_SLNet = (S_SLNet>(args.l0_ths*S_SLNet.max())).float().sum().item() / torch.numel(S_SLNet)
+                fro_M = torch.norm(M).item()
+                fro_SLNet = torch.norm(M-L_SLNet-S_SLNet).item()
+                mean_error = (M-L_SLNet-S_SLNet).mean().item()
+                L1_SLNet = (S_SLNet>(args.l0_ths*S_SLNet.max())).float().sum().item() / torch.numel(S_SLNet)
 
-            perf_metrics['L1_SLNet'].append(L1_SLNet)
-            perf_metrics['mean_error_SLNet'].append(mean_error)
-            perf_metrics['Rank_SLNet'].append(Rank_SLNet)
-            perf_metrics['Fro_SLNet'].append(fro_SLNet)
-            perf_metrics['Fro_Ratio_SLNet'].append(fro_SLNet/fro_M)
+                perf_metrics['L1_SLNet'].append(L1_SLNet)
+                perf_metrics['mean_error_SLNet'].append(mean_error)
+                perf_metrics['Rank_SLNet'].append(Rank_SLNet)
+                perf_metrics['Fro_SLNet'].append(fro_SLNet)
+                perf_metrics['Fro_Ratio_SLNet'].append(fro_SLNet/fro_M)
 
-            
-            input_noisy_grid = tv.utils.make_grid(curr_slice[args.slice_to_grab,0,...].float().unsqueeze(0).cpu().data.detach(), normalize=True, scale_each=False)
+                
+                input_noisy_grid = tv.utils.make_grid(curr_slice[args.slice_to_grab,0,...].float().unsqueeze(0).cpu().data.detach(), normalize=True, scale_each=False)
 
-            sparse_part = F.relu(sparse_part.detach()).float()
-            dense_prediction = F.relu(dense_part.detach()).float()
-            reconstructed_dense_prediciton = F.relu(reconstructed_dense.detach()).float()
+                sparse_part = F.relu(sparse_part.detach()).float()
+                dense_prediction = F.relu(dense_part.detach()).float()
+                reconstructed_dense_prediciton = F.relu(reconstructed_dense.detach()).float()
 
-            Y = sparse_part+dense_prediction
+                Y = sparse_part+dense_prediction
 
-            sparse_part /= Y.max()
-            input_intermediate_sparse_grid = tv.utils.make_grid(sparse_part[args.slice_to_grab,0,...].float().unsqueeze(0).cpu().data.detach(), normalize=True, scale_each=False)
-            
-            dense_prediction /= Y.max()
-            input_intermediate_dense_grid = tv.utils.make_grid(dense_prediction[args.slice_to_grab,0,...].float().unsqueeze(0).cpu().data.detach(), normalize=True, scale_each=False)
-            
-            dense_prediction /= Y.max()
-            input_intermediate_recon_dense_grid = tv.utils.make_grid(dense_prediction[args.slice_to_grab,0,...].float().unsqueeze(0).cpu().data.detach(), normalize=True, scale_each=False)
-            
-            input_intermediate_sparse_GT_grid = tv.utils.make_grid(curr_slice_sparse[args.slice_to_grab,0,...].float().unsqueeze(0).cpu().data.detach(), normalize=True, scale_each=False)
-            
-            writer.add_image('input_noisy_'+curr_train_stage, input_noisy_grid, epoch)
-            writer.add_image('image_intermediate_sparse'+curr_train_stage, input_intermediate_sparse_grid, epoch)
-            writer.add_image('image_intermediate_dense'+curr_train_stage, input_intermediate_dense_grid, epoch)
-            writer.add_image('image_reconSVC_dense'+curr_train_stage, input_intermediate_recon_dense_grid, epoch)
-            writer.add_image('GT_S_'+curr_train_stage, input_intermediate_sparse_GT_grid, epoch)
-            writer.add_scalar('Loss/'+curr_train_stage, mean_loss, epoch)
-            writer.add_scalar('Loss/mean_sparse_l1_'+curr_train_stage, mean_sparse_l1, epoch)
-            writer.add_scalar('regularization_weights/alpha_l1', net.alpha_l1, epoch)
-            writer.add_scalar('regularization_weights/mu_sum_constraint', net.mu_sum_constraint.item(), epoch)
-            writer.add_scalar('regularization_weights/eigen_crop_percentage', mean_eigen_crop, epoch)
-            writer.add_scalar('psnr/'+curr_train_stage, mean_psnr, epoch)
-            writer.add_scalar('times/'+curr_train_stage, mean_time, epoch)
-            writer.add_scalar('lr/'+curr_train_stage, args.learning_rate, epoch)
-            
-            # writer.add_histogram('eigenvalues/'+curr_train_stage, mean_eigen_values, epoch)
-            # writer.add_histogram('eigenvalues_cropped/'+curr_train_stage, mean_eigen_values_cropped, epoch)
+                sparse_part /= Y.max()
+                input_intermediate_sparse_grid = tv.utils.make_grid(sparse_part[args.slice_to_grab,0,...].float().unsqueeze(0).cpu().data.detach(), normalize=True, scale_each=False)
+                
+                dense_prediction /= Y.max()
+                input_intermediate_dense_grid = tv.utils.make_grid(dense_prediction[args.slice_to_grab,0,...].float().unsqueeze(0).cpu().data.detach(), normalize=True, scale_each=False)
+                
+                dense_prediction /= Y.max()
+                input_intermediate_recon_dense_grid = tv.utils.make_grid(dense_prediction[args.slice_to_grab,0,...].float().unsqueeze(0).cpu().data.detach(), normalize=True, scale_each=False)
+                
+                input_intermediate_sparse_GT_grid = tv.utils.make_grid(curr_slice_sparse[args.slice_to_grab,0,...].float().unsqueeze(0).cpu().data.detach(), normalize=True, scale_each=False)
+                
+                writer.add_image('input_noisy_'+curr_train_stage, input_noisy_grid, epoch)
+                writer.add_image('image_intermediate_sparse'+curr_train_stage, input_intermediate_sparse_grid, epoch)
+                writer.add_image('image_intermediate_dense'+curr_train_stage, input_intermediate_dense_grid, epoch)
+                writer.add_image('image_reconSVC_dense'+curr_train_stage, input_intermediate_recon_dense_grid, epoch)
+                writer.add_image('GT_S_'+curr_train_stage, input_intermediate_sparse_GT_grid, epoch)
+                writer.add_scalar('Loss/'+curr_train_stage+str(i), mean_losses[i], epoch)
+                writer.add_scalar('Loss/mean_sparse_l1_'+curr_train_stage + str(i), mean_sparse_l1[i], epoch)
+                # writer.add_scalar('regularization_weights/alpha_l1', net.alpha_l1, epoch)
+                # writer.add_scalar('regularization_weights/mu_sum_constraint', net.mu_sum_constraint.item(), epoch)
+                writer.add_scalar('regularization_weights/eigen_crop_percentage', mean_eigen_crop, epoch)
+                # writer.add_scalar('psnr/'+curr_train_stage, mean_psnr, epoch)
+                writer.add_scalar('times/'+curr_train_stage, mean_time, epoch)
+                writer.add_scalar('lr/'+curr_train_stage, args.learning_rate, epoch)
+                
+                # writer.add_histogram('eigenvalues/'+curr_train_stage, mean_eigen_values, epoch)
+                # writer.add_histogram('eigenvalues_cropped/'+curr_train_stage, mean_eigen_values_cropped, epoch)
 
 
-            for k,v in perf_metrics.items():
-                writer.add_scalar('metrics/'+k+'_'+curr_train_stage, v[-1], epoch)
+                for k,v in perf_metrics.items():
+                    writer.add_scalar('metrics/'+k+'_'+curr_train_stage, v[-1], epoch)
 
-        print(str(epoch) + ' ' + curr_train_stage + " loss: " + str(mean_loss) + " eigenCrop: " + str(mean_eigen_crop) + " time: " + str(mean_time))#, end="\r")
+        print(str(epoch) + ' ' + curr_train_stage + " loss: " + str(mean_losses[0]) + " eigenCrop: " + str(mean_eigen_crop) + " time: " + str(mean_time))#, end="\r")
 
         if epoch%10==0:
             print("saving")
@@ -458,8 +479,8 @@ for epoch in range(start_epoch, args.max_epochs):
             'epoch': epoch,
             'args' : args,
             'statistics' : [mean_imgs,std_images,mean_vols,std_vols ],
-            'model_state_dict': net.state_dict(),
+            # 'model_state_dict': net.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
             'scaler_state_dict' : scaler.state_dict(),
-            'loss': mean_loss},
+            'loss': mean_losses[0]},
             save_folder + '/model_'+str(epoch))
