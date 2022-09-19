@@ -1,3 +1,4 @@
+from json import load
 import torch
 from torch.utils import data
 import torch.nn.functional as F
@@ -7,6 +8,8 @@ from PIL import Image
 from torchvision.transforms import ToTensor
 import numpy as np
 from tifffile import imread
+from tqdm import tqdm
+import multipagetiff as mtif
 
 import utils.pytorch_shot_noise as pytorch_shot_noise
 from utils.misc_utils import *
@@ -518,11 +521,12 @@ class XLFMDatasetFullRegistration(data.Dataset):
 
 class XLFMDatasetVol(data.Dataset):
     def __init__(self, data_path, lenslet_coords_path, subimage_shape, img_shape, images_to_use=None, lenslets_offset=50, n_depths_to_fill=120, border_blanking=10,
-     load_vols=True, load_sparse=False, temporal_shifts=[0,1,2], use_random_shifts=False, maxWorkers=10):
+     load_imgs=False, load_vols=True, load_sparse=False, temporal_shifts=[0,1,2], use_random_shifts=False, maxWorkers=10):
         # Load lenslets coordinates
         self.lenslet_coords = get_lenslet_centers(lenslet_coords_path) + torch.tensor(lenslets_offset)
         self.n_lenslets = self.lenslet_coords.shape[0]
         self.data_path = data_path
+        self.load_imgs = load_imgs
         self.load_vols = load_vols
         self.load_sparse = load_sparse
         self.temporal_shifts = temporal_shifts
@@ -540,15 +544,19 @@ class XLFMDatasetVol(data.Dataset):
         vols_path = data_path + '/XLFM_stack/*.tif'
 
         # dataset = Image.open(imgs_path)
-        self.img_dataset = imread(imgs_path, maxworkers=maxWorkers)
-        n_frames,h,w = np.shape(self.img_dataset)
+        if load_imgs:
+            self.img_dataset = imread(imgs_path, maxworkers=maxWorkers)
+            n_frames,h,w = np.shape(self.img_dataset)
+            if self.load_sparse:
+                try:
+                    self.img_dataset_sparse = imread(imgs_path_sparse, maxworkers=maxWorkers)
+                except:
+                    self.load_sparse = False
+                    print('Dataset error: Sparse dir XLFM_image/XLFM_image_stack_S.tif not found')
+        else:
+            n_frames = len(images_to_use)
 
-        if self.load_sparse:
-            try:
-                self.img_dataset_sparse = imread(imgs_path_sparse, maxworkers=maxWorkers)
-            except:
-                self.load_sparse = False
-                print('Dataset error: Sparse dir XLFM_image/XLFM_image_stack_S.tif not found')
+        
 
         if images_to_use is None:
             images_to_use = list(range(n_frames))
@@ -577,14 +585,15 @@ class XLFMDatasetVol(data.Dataset):
             odd_size = self.subimage_shape
             self.vols = 255*torch.ones(1)
         
-        # Create image storage
-        self.stacked_views = torch.zeros(self.n_images, self.img_shape[0], self.img_shape[1],dtype=torch.float16)
-        
+        if load_imgs:
+            # Create image storage
+            self.stacked_views = torch.zeros(self.n_images, self.img_shape[0], self.img_shape[1],dtype=torch.float16)
+        else:
+            self.stacked_views = torch.ones([1])
         if self.load_sparse:
             stacked_views_sparse = self.stacked_views.clone()
 
-        for nImg in range(self.n_images):
-
+        for nImg in tqdm (range(self.n_images), desc="Loading Img..."):
             # Load the images indicated from the user
             curr_img = images_to_use[nImg]
 
@@ -601,18 +610,17 @@ class XLFMDatasetVol(data.Dataset):
                 self.vols[nImg,:currVol.shape[2],:,:] = currVol.permute(2,0,1)\
                     [:,self.volStart[0]:self.volEnd[0],self.volStart[1]:self.volEnd[1]]
 
-            
-            image = torch.from_numpy(np.array(self.img_dataset[curr_img,:,:]).astype(np.float16)).type(torch.float16)
-
-            image = self.pad_img_to_min(image)
-            self.stacked_views[nImg,...] = center_crop(image.unsqueeze(0).unsqueeze(0), self.img_shape)[0,0,...]
-            
-            if self.load_sparse:
-                image = torch.from_numpy(np.array(self.img_dataset_sparse[curr_img,:,:]).astype(np.float16)).type(torch.float16)
+            if load_imgs:
+                image = torch.from_numpy(np.array(self.img_dataset[curr_img,:,:]).astype(np.float16)).type(torch.float16)
                 image = self.pad_img_to_min(image)
-                stacked_views_sparse[nImg,...] = image
+                self.stacked_views[nImg,...] = center_crop(image.unsqueeze(0).unsqueeze(0), self.img_shape)[0,0,...]
+                
+                if self.load_sparse:
+                    image = torch.from_numpy(np.array(self.img_dataset_sparse[curr_img,:,:]).astype(np.float16)).type(torch.float16)
+                    image = self.pad_img_to_min(image)
+                    stacked_views_sparse[nImg,...] = image
 
-        if self.load_sparse:
+        if load_imgs and self.load_sparse:
             self.stacked_views = torch.cat((self.stacked_views.unsqueeze(-1), stacked_views_sparse.unsqueeze(-1)), dim=3)
 
         print('Loaded ' + str(self.n_images))  
@@ -688,20 +696,15 @@ class XLFMDatasetVol(data.Dataset):
 
         indices = [img_index + temporal_shifts_ixs[i] for i in range(n_frames)]
         
-        views_out = self.stacked_views[indices,...]
-        if self.load_vols is False:
-            return views_out,0
-        # vol_out1 = self.vols[img_index,...]
-        # if img_index + indices[0] >= len(self.vols):
-        #     vol_out2 = vol_out1
-        # else:
-        #     vol_out2 = self.vols[img_index+1,...]
-        # if img_index + 2 >= len(self.vols):
-        #     vol_out3 = vol_out2
-        # else:
-        #     vol_out3 = self.vols[img_index+2,...]
-        # vol_out = torch.cat((vol_out1.unsqueeze(0),vol_out2.unsqueeze(0),vol_out3.unsqueeze(0)),0)
-        vol_out = self.vols[indices,...]
+        if self.load_imgs:
+            views_out = self.stacked_views[indices,...]
+        else:
+            views_out = 0
+        if self.load_vols:
+            vol_out = self.vols[indices,...]
+        else:
+            vol_out = 0
+
         return views_out,vol_out
 
     
@@ -737,22 +740,24 @@ class XLFMDatasetVol(data.Dataset):
         return stacked_views
         
     @staticmethod
-    def read_tiff_stack(filename, out_datatype=np.float16):
-        try:
-            max_val = np.iinfo(out_datatype).max
-        except:
-            max_val = np.finfo(out_datatype).max
+    def read_tiff_stack(filename, out_datatype=torch.float16):
+        tiffarray = mtif.read_stack(filename, units='voxels')
+        # try:
+        #     max_val = np.iinfo(out_datatype).max
+        # except:
+        #     max_val = np.finfo(out_datatype).max
 
-        dataset = Image.open(filename)
-        h,w = np.shape(dataset)
-        tiffarray = np.zeros([h,w,dataset.n_frames], dtype=out_datatype)
-        for i in range(dataset.n_frames):
-            dataset.seek(i)
-            img =  np.array(dataset)
-            img = np.nan_to_num(img)
-            # img[img>=max_val/2] = max_val/2
-            tiffarray[:,:,i] = img.astype(out_datatype)
-        return torch.from_numpy(tiffarray)
+        # dataset = Image.open(filename)
+        # h,w = np.shape(dataset)
+        # tiffarray = np.zeros([h,w,dataset.n_frames], dtype=out_datatype)
+        # for i in range(dataset.n_frames):
+        #     dataset.seek(i)
+        #     img =  np.array(dataset)
+        #     img = np.nan_to_num(img)
+        #     # img[img>=max_val/2] = max_val/2
+        #     tiffarray[:,:,i] = img.astype(out_datatype)
+        # out = np.clip(tiffarray.raw_images, 0, 20000).astype(out_datatype)
+        return torch.from_numpy(tiffarray.raw_images).permute(1,2,0).type(out_datatype)
 
     def add_random_shot_noise_to_dataset(self, signal_power_range=[32**2,32**2]):
         for nImg in range(self.stacked_views.shape[0]):
