@@ -742,22 +742,12 @@ class XLFMDatasetVol(data.Dataset):
     @staticmethod
     def read_tiff_stack(filename, out_datatype=torch.float16):
         tiffarray = mtif.read_stack(filename, units='voxels')
-        # try:
-        #     max_val = np.iinfo(out_datatype).max
-        # except:
-        #     max_val = np.finfo(out_datatype).max
-
-        # dataset = Image.open(filename)
-        # h,w = np.shape(dataset)
-        # tiffarray = np.zeros([h,w,dataset.n_frames], dtype=out_datatype)
-        # for i in range(dataset.n_frames):
-        #     dataset.seek(i)
-        #     img =  np.array(dataset)
-        #     img = np.nan_to_num(img)
-        #     # img[img>=max_val/2] = max_val/2
-        #     tiffarray[:,:,i] = img.astype(out_datatype)
-        # out = np.clip(tiffarray.raw_images, 0, 20000).astype(out_datatype)
-        return torch.from_numpy(tiffarray.raw_images).permute(1,2,0).type(out_datatype)
+        try:
+            max_val = torch.iinfo(out_datatype).max
+        except:
+            max_val = torch.finfo(out_datatype).max
+        out = np.clip(tiffarray.raw_images, 0, max_val)
+        return torch.from_numpy(out).permute(1,2,0).type(out_datatype)
 
     def add_random_shot_noise_to_dataset(self, signal_power_range=[32**2,32**2]):
         for nImg in range(self.stacked_views.shape[0]):
